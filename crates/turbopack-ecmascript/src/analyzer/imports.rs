@@ -77,7 +77,7 @@ impl Display for ImportAnnotations {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum Reexport {
     Star,
     Namespace { exported: JsWord },
@@ -88,7 +88,7 @@ pub(crate) enum Reexport {
 ///
 /// Note that when it's initialized by calling `analyze`, it only contains ESM
 /// import/exports.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 pub(crate) struct ImportMap {
     /// Map from identifier to (index in references, exported symbol)
     imports: IndexMap<Id, (usize, JsWord)>,
@@ -106,14 +106,14 @@ pub(crate) struct ImportMap {
     has_exports: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum ImportedSymbol {
     ModuleEvaluation,
     Symbol(JsWord),
     Namespace,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ImportMapReference {
     pub module_path: JsWord,
     pub imported_symbol: ImportedSymbol,
