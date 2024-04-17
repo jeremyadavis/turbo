@@ -266,7 +266,7 @@ impl Visit for Analyzer<'_> {
         );
 
         for s in &import.specifiers {
-            let symbol = get_import_symbol_from_import(s);
+            let symbol = get_import_symbol_from_import(s, import.with.as_deref());
             let i = self.ensure_reference(
                 import.span,
                 import.src.value.clone(),
@@ -324,7 +324,7 @@ impl Visit for Analyzer<'_> {
             );
 
             for spec in export.specifiers.iter() {
-                let symbol = get_import_symbol_from_export(spec);
+                let symbol = get_import_symbol_from_export(spec, export.with.as_deref());
 
                 let i = self.ensure_reference(
                     export.span,
@@ -386,7 +386,15 @@ pub(crate) fn orig_name(n: &ModuleExportName) -> JsWord {
     }
 }
 
-fn get_import_symbol_from_import(specifier: &ImportSpecifier) -> ImportedSymbol {
+fn get_import_symbol_from_import(
+    specifier: &ImportSpecifier,
+    with: Option<&ObjectLit>,
+) -> ImportedSymbol {
+    dbg!(&with);
+    if let Some(with) = with.and_then(|with| with.as_import_with()) {
+        dbg!(&with.values);
+    }
+
     match specifier {
         ImportSpecifier::Named(ImportNamedSpecifier {
             local, imported, ..
@@ -399,7 +407,12 @@ fn get_import_symbol_from_import(specifier: &ImportSpecifier) -> ImportedSymbol 
     }
 }
 
-fn get_import_symbol_from_export(specifier: &ExportSpecifier) -> ImportedSymbol {
+fn get_import_symbol_from_export(
+    specifier: &ExportSpecifier,
+    with: Option<&ObjectLit>,
+) -> ImportedSymbol {
+    dbg!(with);
+
     match specifier {
         ExportSpecifier::Named(ExportNamedSpecifier { orig, .. }) => {
             ImportedSymbol::Symbol(orig_name(orig))
