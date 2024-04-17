@@ -3,7 +3,8 @@ resolver = "2"
 
 members = [
   "crates/node-file-trace",
-  "crates/tower-uds",
+  "crates/tower-uds", 
+  "crates/turbo-static",
   "crates/turbo-tasks*",
   "crates/turbopack*",
   "crates/turborepo*",

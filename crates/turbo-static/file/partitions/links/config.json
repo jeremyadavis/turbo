@@ -1,0 +1,8 @@
+{
+  "path": "/Users/arlyon/Programming/nextpack/turbo/crates/turbo-static/file/partitions/links",
+  "block_size": 4096,
+  "level_count": 7,
+  "level_ratio": 8,
+  "type": "Standard",
+  "compression": "Lz4"
+}
