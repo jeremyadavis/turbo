@@ -49,7 +49,7 @@ use swc_core::{
     },
 };
 use tracing::Instrument;
-use turbo_tasks::{TryJoinIterExt, Upcast, Value, ValueToString, Vc};
+use turbo_tasks::{vdbg, TryJoinIterExt, Upcast, Value, ValueToString, Vc};
 use turbo_tasks_fs::FileSystemPath;
 use turbopack_core::{
     compile_time_info::{CompileTimeInfo, FreeVarReference},
@@ -403,6 +403,7 @@ pub(crate) async fn analyse_ecmascript_module_internal(
     };
 
     let parsed = if let Some(part) = part {
+        vdbg!("Calling split() on", path);
         let parsed = parse(source, ty, transforms);
         let split_data = split(path, source, parsed);
         part_of_module(split_data, part)
