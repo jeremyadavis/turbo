@@ -167,7 +167,7 @@ async fn apply_module_type(
                         if let Some(part) = part {
                             Vc::upcast(builder.build_part(part))
                         } else {
-                            Vc::upcast(builder.build_part(ModulePart::exports()))
+                            Vc::upcast(builder.build_part(ModulePart::facade()))
                         }
                     }
                     Some(TreeShakingMode::ReexportsOnly) => {
