@@ -109,7 +109,6 @@ pub(crate) struct ImportMap {
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum ImportedSymbol {
     ModuleEvaluation,
-    Exports,
     Symbol(JsWord),
     Namespace,
     Part(u32),
@@ -407,7 +406,7 @@ fn parse_with(with: Option<&ObjectLit>) -> Option<ImportedSymbol> {
                         if value == "module evaluation" {
                             return Some(ImportedSymbol::ModuleEvaluation);
                         } else if value == "expors" {
-                            return Some(ImportedSymbol::Exports);
+                            return Some(ImportedSymbol::Namespace);
                         }
                     }
                 }
