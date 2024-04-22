@@ -168,11 +168,16 @@ impl ImportMap {
     }
 
     /// Analyze ES import
-    pub(super) fn analyze(m: &Program, source: Option<Vc<Box<dyn Source>>>) -> Self {
+    pub(super) fn analyze(
+        m: &Program,
+        skip_namespace: bool,
+        source: Option<Vc<Box<dyn Source>>>,
+    ) -> Self {
         let mut data = ImportMap::default();
 
         m.visit_with(&mut Analyzer {
             data: &mut data,
+            skip_namespace,
             current_annotations: ImportAnnotations::default(),
             source,
         });
@@ -184,6 +189,7 @@ impl ImportMap {
 struct Analyzer<'a> {
     data: &'a mut ImportMap,
     current_annotations: ImportAnnotations,
+    skip_namespace: bool,
     source: Option<Vc<Box<dyn Source>>>,
 }
 
@@ -194,7 +200,11 @@ impl<'a> Analyzer<'a> {
         module_path: JsWord,
         imported_symbol: ImportedSymbol,
         annotations: ImportAnnotations,
-    ) -> usize {
+    ) -> Option<usize> {
+        if self.skip_namespace && matches!(imported_symbol, ImportedSymbol::Namespace) {
+            return None;
+        }
+
         let issue_source = self
             .source
             .map(|s| IssueSource::from_swc_offsets(s, span.lo.to_usize(), span.hi.to_usize()));
@@ -206,11 +216,11 @@ impl<'a> Analyzer<'a> {
             annotations,
         };
         if let Some(i) = self.data.references.get_index_of(&r) {
-            i
+            Some(i)
         } else {
             let i = self.data.references.len();
             self.data.references.insert(r);
-            i
+            Some(i)
         }
     }
 }
@@ -274,6 +284,10 @@ impl Visit for Analyzer<'_> {
                 symbol,
                 annotations.clone(),
             );
+            let i = match i {
+                Some(v) => v,
+                None => continue,
+            };
 
             let (local, orig_sym) = match s {
                 ImportSpecifier::Named(ImportNamedSpecifier {
@@ -309,7 +323,9 @@ impl Visit for Analyzer<'_> {
             ImportedSymbol::Namespace,
             annotations,
         );
-        self.data.reexports.push((i, Reexport::Star));
+        if let Some(i) = i {
+            self.data.reexports.push((i, Reexport::Star));
+        }
     }
 
     fn visit_named_export(&mut self, export: &NamedExport) {
@@ -333,6 +349,10 @@ impl Visit for Analyzer<'_> {
                     symbol,
                     annotations.clone(),
                 );
+                let i = match i {
+                    Some(v) => v,
+                    None => continue,
+                };
 
                 match spec {
                     ExportSpecifier::Namespace(n) => {
