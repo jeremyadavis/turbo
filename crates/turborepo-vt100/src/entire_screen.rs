@@ -19,6 +19,9 @@ impl<'a> EntireScreen<'a> {
         self.max_lines = max_lines;
     }
 
+    /// # Panics
+    ///
+    /// Will panic if `height` or `max_lines` do not fit in a u16.
     #[must_use]
     pub fn cell(&self, row: u16, col: u16) -> Option<&crate::Cell> {
         match self.max_lines {
@@ -27,7 +30,9 @@ impl<'a> EntireScreen<'a> {
                 // in this case we fuck ourselves :) HARD
                 let (height, _) = self.size();
                 // Skip over these
-                let lines_to_cut = (height - max_lines) as u16;
+                let lines_to_cut: u16 = (height - max_lines)
+                    .try_into()
+                    .expect("height and max_lines should fit in a u16");
                 self.screen
                     .grid()
                     .all_row(lines_to_cut + row)
