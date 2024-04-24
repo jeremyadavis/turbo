@@ -1,7 +1,7 @@
 use std::{path::PathBuf, process};
 
 use crossbeam_channel::bounded;
-use lsp_server::{IoThreads, Message};
+use lsp_server::Message;
 
 /// An LSP client for Rust Analyzer (RA) that launches it as a subprocess.
 pub struct RAClient {
@@ -23,6 +23,7 @@ impl RAClient {
             .stdout(stdout)
             .stderr(stderr)
             // .env("RA_LOG", "info")
+            .env("RUST_BACKTRACE", "1")
             .spawn()
             .expect("Failed to start RA LSP server");
         Self {
@@ -33,18 +34,18 @@ impl RAClient {
     }
 
     pub fn start(&mut self, folders: &[PathBuf]) {
-        let mut stdout = self.handle.stdout.take().unwrap();
+        let stdout = self.handle.stdout.take().unwrap();
         let mut stdin = self.handle.stdin.take().unwrap();
 
         let (writer_sender, writer_receiver) = bounded::<Message>(0);
-        let writer = std::thread::spawn(move || {
+        _ = std::thread::spawn(move || {
             writer_receiver
                 .into_iter()
                 .try_for_each(|it| it.write(&mut stdin))
         });
 
         let (reader_sender, reader_receiver) = bounded::<Message>(0);
-        let reader = std::thread::spawn(move || {
+        _ = std::thread::spawn(move || {
             let mut reader = std::io::BufReader::new(stdout);
             while let Ok(Some(msg)) = Message::read(&mut reader) {
                 reader_sender
@@ -56,10 +57,6 @@ impl RAClient {
         self.sender = Some(writer_sender);
         self.receiver = Some(reader_receiver);
 
-        let root_path = std::fs::canonicalize(folders.first().unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
         let workspace_paths = folders
             .iter()
             .map(|p| std::fs::canonicalize(p).unwrap())
@@ -69,12 +66,10 @@ impl RAClient {
             })
             .collect::<Vec<_>>();
 
-        let resp = self.request(lsp_server::Request {
+        _ = self.request(lsp_server::Request {
             id: 1.into(),
             method: "initialize".to_string(),
-            params: serde_json::to_value(&lsp_types::InitializeParams {
-                root_uri: Some(lsp_types::Url::from_file_path(&root_path).unwrap()),
-                root_path: Some(root_path),
+            params: serde_json::to_value(lsp_types::InitializeParams {
                 workspace_folders: Some(workspace_paths),
                 process_id: Some(std::process::id()),
                 capabilities: lsp_types::ClientCapabilities {
@@ -84,20 +79,19 @@ impl RAClient {
                     }),
                     ..Default::default()
                 },
-                initialization_options: None,
                 work_done_progress_params: lsp_types::WorkDoneProgressParams {
                     work_done_token: Some(lsp_types::ProgressToken::String("prepare".to_string())),
                 },
-                trace: None,
-                client_info: None,
-                locale: None,
+                // we use workspace_folders so root_path and root_uri can be
+                // empty
+                ..Default::default()
             })
             .unwrap(),
         });
 
-        let resp = self.notify(lsp_server::Notification {
+        self.notify(lsp_server::Notification {
             method: "initialized".to_string(),
-            params: serde_json::to_value(&lsp_types::InitializedParams {}).unwrap(),
+            params: serde_json::to_value(lsp_types::InitializedParams {}).unwrap(),
         });
     }
 
@@ -141,14 +135,14 @@ impl Drop for RAClient {
             let resp = self.request(lsp_server::Request {
                 id: 1.into(),
                 method: "shutdown".to_string(),
-                params: serde_json::to_value(&()).unwrap(),
+                params: serde_json::to_value(()).unwrap(),
             });
 
             if resp.error.is_none() {
                 tracing::info!("shutting down RA LSP server");
                 self.notify(lsp_server::Notification {
                     method: "exit".to_string(),
-                    params: serde_json::to_value(&()).unwrap(),
+                    params: serde_json::to_value(()).unwrap(),
                 });
                 self.handle
                     .wait()

@@ -1,11 +1,20 @@
-use std::{collections::HashMap, error::Error, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fs,
+    path::PathBuf,
+};
 
+use call_resolver::CallResolver;
 use clap::Parser;
-use fjall::{Config, Keyspace, PartitionCreateOptions};
+use fjall::Config;
+use identifier::{Identifier, IdentifierReference};
 use itertools::Itertools;
-use lsp_server::{Connection, Message, Request, RequestId, Response};
-use lsp_types::ClientCapabilities;
 
+use crate::visitor::CallingStyle;
+
+mod call_resolver;
+mod identifier;
 mod lsp_client;
 mod visitor;
 
@@ -33,20 +42,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Each partition is its own physical LSM-tree
     let fjall = Config::new("file").open()?;
 
-    tracing::info!("getting tasks");
-    let tasks = get_all_tasks(&opt.paths);
-    let dep_tree = resolve_tasks(&tasks, &mut connection, &fjall, opt.reindex);
-    let concurrency = resolve_concurrency(&dep_tree);
+    let call_resolver = CallResolver::new(&mut connection, &fjall);
+    let mut call_resolver = if opt.reindex {
+        call_resolver.cleared()
+    } else {
+        call_resolver
+    };
 
-    write_dep_tree(&dep_tree, std::path::Path::new("here"));
+    tracing::info!("getting tasks");
+    let mut tasks = get_all_tasks(&opt.paths);
+    let dep_tree = resolve_tasks(&mut tasks, &mut call_resolver);
+    let concurrency = resolve_concurrency(&tasks, &dep_tree);
+
+    write_dep_tree(&tasks, concurrency, std::path::Path::new("graph.cypherl"));
 
     Ok(())
 }
 
 /// search the given folders recursively and attempt to find all tasks inside
 #[tracing::instrument(skip_all)]
-fn get_all_tasks(folders: &[PathBuf]) -> Vec<(PathBuf, (syn::Ident, Vec<String>))> {
-    let mut out = vec![];
+fn get_all_tasks(folders: &[PathBuf]) -> HashMap<Identifier, Vec<String>> {
+    let mut out = HashMap::new();
 
     for folder in folders {
         let walker = ignore::Walk::new(folder);
@@ -70,10 +86,9 @@ fn get_all_tasks(folders: &[PathBuf]) -> Vec<(PathBuf, (syn::Ident, Vec<String>)
 
             tracing::debug!("processing {}", rs_file.display());
 
-            for ((_, line), (line_no, fn_line)) in lines.enumerate().tuple_windows() {
+            for ((_, line), (line_no, _)) in lines.enumerate().tuple_windows() {
                 if line.contains("turbo_tasks::function") {
                     tracing::debug!("found at {:?}:L{}", rs_file, line_no);
-                    let task_name = fn_line.to_owned();
                     occurences.push(line_no + 1);
                 }
             }
@@ -100,7 +115,7 @@ fn get_all_tasks(folders: &[PathBuf]) -> Vec<(PathBuf, (syn::Ident, Vec<String>)
                 visitor
                     .results
                     .into_iter()
-                    .map(move |ident| (rs_file.clone(), ident)),
+                    .map(move |(ident, tags)| ((rs_file.clone(), ident).into(), tags)),
             )
         }
     }
@@ -108,172 +123,137 @@ fn get_all_tasks(folders: &[PathBuf]) -> Vec<(PathBuf, (syn::Ident, Vec<String>)
     out
 }
 
+/// Given a list of tasks, get all the tasks that call that one
 fn resolve_tasks(
-    tasks: &[(PathBuf, (syn::Ident, Vec<String>))],
-    client: &mut lsp_client::RAClient,
-    fjall: &fjall::Keyspace,
-    reindex: bool,
-) -> HashMap<String, Vec<(String, lsp_types::Range)>> {
-    let items = fjall
-        .open_partition("links", PartitionCreateOptions::default())
-        .unwrap();
-
-    let items = if reindex {
-        fjall.delete_partition(items).unwrap();
-        fjall
-            .open_partition("links", PartitionCreateOptions::default())
-            .unwrap()
-    } else {
-        items
-    };
-
+    tasks: &mut HashMap<Identifier, Vec<String>>,
+    client: &mut CallResolver,
+) -> HashMap<Identifier, Vec<IdentifierReference>> {
     tracing::info!(
         "found {} tasks, of which {} cached",
         tasks.len(),
-        items.len().unwrap()
+        client.cached()
     );
 
-    let mut out = HashMap::new();
+    let mut unresolved = tasks.keys().cloned().collect::<HashSet<_>>();
+    let mut resolved = HashMap::new();
 
-    for (path, (ident, tags)) in tasks {
-        let key = format!(
-            "{}#{}:{}",
-            path.display(),
-            ident.to_string(),
-            ident.span().start().line
-        );
-        if let Some(data) = items.get(&key).unwrap() {
-            tracing::info!("skipping {}: got data {:?}", key, data);
+    while let Some(top) = unresolved.iter().next().cloned() {
+        unresolved.remove(&top);
 
-            let data: Vec<(String, lsp_types::Range)> = bincode::deserialize(&data).unwrap();
-            out.insert(key, data);
-            continue;
-        };
+        let callers = client.resolve(&top);
 
-        tracing::info!("checking {} in {}", ident, path.display());
-
-        let mut count = 0;
-        let response = loop {
-            let response = client.request(lsp_server::Request {
-                id: 1.into(),
-                method: "textDocument/prepareCallHierarchy".to_string(),
-                params: serde_json::to_value(&lsp_types::CallHierarchyPrepareParams {
-                    text_document_position_params: lsp_types::TextDocumentPositionParams {
-                        position: lsp_types::Position {
-                            line: ident.span().start().line as u32 - 1, // 0-indexed
-                            character: ident.span().start().column as u32,
-                        },
-                        text_document: lsp_types::TextDocumentIdentifier {
-                            uri: lsp_types::Url::from_file_path(&path).unwrap(),
-                        },
-                    },
-                    work_done_progress_params: lsp_types::WorkDoneProgressParams {
-                        work_done_token: Some(lsp_types::ProgressToken::String(
-                            "prepare".to_string(),
-                        )),
-                    },
-                })
-                .unwrap(),
-            });
-            if let Some(Some(value)) = response.result.as_ref().map(|r| r.as_array()) {
-                if value.len() != 0 {
-                    break value.to_owned();
-                }
-                count += 1;
+        // add all non-task callers to the unresolved list if they are not in the
+        // resolved list
+        for caller in callers.iter() {
+            if !resolved.contains_key(&caller.identifier)
+                && !unresolved.contains(&caller.identifier)
+            {
+                tracing::debug!("adding {} to unresolved", caller.identifier);
+                unresolved.insert(caller.identifier.to_owned());
             }
-
-            // textDocument/prepareCallHierarchy will sometimes return an empty array so try
-            // at most 5 times
-            if count > 5 {
-                tracing::warn!("discovered isolated task {} in {}", ident, path.display());
-                break vec![];
-            }
-
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        };
-
-        // callHierarchy/incomingCalls
-        let response = client.request(lsp_server::Request {
-            id: 1.into(),
-            method: "callHierarchy/incomingCalls".to_string(),
-            params: serde_json::to_value(&lsp_types::CallHierarchyIncomingCallsParams {
-                partial_result_params: lsp_types::PartialResultParams::default(),
-                item: lsp_types::CallHierarchyItem {
-                    name: ident.to_string().clone(),
-                    kind: lsp_types::SymbolKind::FUNCTION,
-                    data: None,
-                    tags: None,
-                    detail: None,
-                    uri: lsp_types::Url::from_file_path(&path).unwrap(),
-                    range: lsp_types::Range {
-                        start: lsp_types::Position {
-                            line: ident.span().start().line as u32 - 1, // 0-indexed
-                            character: ident.span().start().column as u32,
-                        },
-                        end: lsp_types::Position {
-                            line: ident.span().end().line as u32,
-                            character: ident.span().end().column as u32,
-                        },
-                    },
-                    selection_range: lsp_types::Range {
-                        start: lsp_types::Position {
-                            line: ident.span().start().line as u32 - 1, // 0-indexed
-                            character: ident.span().start().column as u32,
-                        },
-                        end: lsp_types::Position {
-                            line: ident.span().end().line as u32 - 1, // 0-indexed
-                            character: ident.span().end().column as u32,
-                        },
-                    },
-                },
-                work_done_progress_params: lsp_types::WorkDoneProgressParams {
-                    work_done_token: Some(lsp_types::ProgressToken::String("prepare".to_string())),
-                },
-            })
-            .unwrap(),
-        });
-
-        let response: Result<Vec<lsp_types::CallHierarchyIncomingCall>, _> =
-            serde_path_to_error::deserialize(response.result.unwrap());
-
-        let links = response
-            .unwrap()
-            .into_iter()
-            .map(|i| (i.from.uri.to_string(), i.from.selection_range))
-            .collect::<Vec<(String, lsp_types::Range)>>();
-
-        let data = bincode::serialize(&links).unwrap();
-
-        tracing::info!("links: {:?}: {:?}", links, data);
-
-        items.insert(key, data).unwrap();
-        fjall.persist().unwrap();
-        return out;
+        }
+        resolved.insert(top.to_owned(), callers);
     }
 
-    out
-}
-
-enum CallingStyle {
-    Once,
-    ZeroOrOnce,
-    ZeroOrMore,
-    OneOrMore,
+    resolved
 }
 
 /// given a map of tasks and functions that call it, produce a map of tasks and
 /// those tasks that it calls
-
 fn resolve_concurrency(
-    dep_tree: &HashMap<String, Vec<(String, lsp_types::Range)>>,
-) -> HashMap<String, Vec<(String, lsp_types::SelectionRange, CallingStyle)>> {
-    Default::default()
+    task_list: &HashMap<Identifier, Vec<String>>,
+    dep_tree: &HashMap<Identifier, Vec<IdentifierReference>>, // pairs of tasks and call trees
+) -> Vec<(Identifier, Identifier, CallingStyle)> {
+    // println!("{:?}", dep_tree);
+    // println!("{:#?}", task_list);
+
+    let mut edges = vec![];
+
+    for (ident, references) in dep_tree {
+        for reference in references {
+            if !dep_tree.contains_key(&reference.identifier) {
+                // this is a task that is not in the task list
+                // so we can't resolve it
+                tracing::error!("missing task for {}: {}", ident, reference.identifier);
+                for task in task_list.keys() {
+                    if task.name == reference.identifier.name {
+                        // we found a task that is not in the task list
+                        // so we can't resolve it
+                        tracing::trace!("- found {}", task);
+                        continue;
+                    }
+                }
+                continue;
+            } else {
+                let calling_style = CallingStyle::Once;
+                edges.push((ident.clone(), reference.identifier.clone(), calling_style));
+            }
+        }
+    }
+
+    // parse each fn between parent and child and get the max calling style
+
+    edges
 }
 
+/// Write the dep tree into the given file using cypher syntax
 fn write_dep_tree(
-    dep_tree: &HashMap<String, Vec<(String, lsp_types::Range)>>,
+    task_list: &HashMap<Identifier, Vec<String>>,
+    dep_tree: Vec<(Identifier, Identifier, CallingStyle)>,
     out: &std::path::Path,
 ) {
-    let mut out = std::fs::File::create(out).unwrap();
-    bincode::serialize_into(&mut out, dep_tree).unwrap();
+    use std::io::Write;
+
+    let mut node_ids = HashMap::new();
+    let mut counter = 0;
+
+    let mut file = std::fs::File::create(out).unwrap();
+
+    let empty = vec![];
+
+    // collect all tasks as well as all intermediate nodes
+    // tasks come last to ensure the tags are preserved
+    let node_list = dep_tree
+        .iter()
+        .flat_map(|(dest, src, _)| [(src, &empty), (dest, &empty)])
+        .chain(task_list)
+        .collect::<HashMap<_, _>>();
+
+    for (ident, tags) in node_list {
+        counter += 1;
+
+        let label = if !task_list.contains_key(ident) {
+            "Function"
+        } else if tags.contains(&"fs".to_string()) || tags.contains(&"network".to_string()) {
+            "ImpureTask"
+        } else {
+            "Task"
+        };
+
+        _ = writeln!(
+            file,
+            "CREATE (n_{}:{} {{name: '{}', file: '{}', line: {}, tags: [{}]}})",
+            counter,
+            label,
+            ident.name,
+            ident.path,
+            ident.range.start.line,
+            tags.iter().map(|t| format!("\"{}\"", t)).join(",")
+        );
+        node_ids.insert(ident, counter);
+    }
+
+    for (dest, src, style) in &dep_tree {
+        let style = match style {
+            CallingStyle::Once => "ONCE",
+            CallingStyle::ZeroOrOnce => "ZERO_OR_ONCE",
+            CallingStyle::ZeroOrMore => "ZERO_OR_MORE",
+            CallingStyle::OneOrMore => "ONE_OR_MORE",
+        };
+
+        let src_id = *node_ids.get(src).unwrap();
+        let dst_id = *node_ids.get(dest).unwrap();
+
+        _ = writeln!(file, "CREATE (n_{})-[:{}]->(n_{})", src_id, style, dst_id,);
+    }
 }

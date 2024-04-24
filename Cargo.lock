@@ -10654,6 +10654,7 @@ dependencies = [
  "lsp-server",
  "lsp-types 0.95.1",
  "proc-macro2",
+ "serde",
  "serde_json",
  "serde_path_to_error",
  "syn 2.0.58",
